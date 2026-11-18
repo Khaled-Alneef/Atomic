@@ -30,6 +30,16 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.26": [
+        "Going back from a chapter now lands straight on the chapter "
+        "list - no flash of the main page first, and the list no longer "
+        "blinks empty for a moment.",
+        "The left and right arrows in the player move at once: each press "
+        "used to wait about a tenth of a second before the video jumped.",
+        "On a slow torrent, skipping ahead no longer waits half a minute "
+        "or more: the source being watched is never put on hold while "
+        "you watch it.",
+    ],
     "3.25": [
         "A source that stops sending when an episode first opens is no "
         "longer waited on forever: the player moves to the next source "

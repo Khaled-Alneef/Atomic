@@ -2861,12 +2861,29 @@ class DetailsPage(GlassPage):
             # count() - 1: the trailing stretch is always the last item,
             # and rows go in above it.
             shown = self._rows.count() - 1
+            inserted = []
             for _ in range(min(int(count), len(self._row_queue))):
                 widget = self._row_queue.pop(0)()
                 if widget is None:
                     continue
                 self._rows.insertWidget(shown, widget)
+                inserted.append(widget)
                 shown += 1
+            # **Shown now, not on the next turn.** insertWidget only
+            # *posts* a row's show (_q_showIfNotHidden), and a refill
+            # runs in the same turn as whatever exposed the list - the
+            # reader's close emits `closed` right after it hides, and
+            # _on_overlay_closed rebuilds every row. The window's paint
+            # was posted first, so it drew the panel with the old rows
+            # gone and the new ones still hidden: an empty list for one
+            # frame on every back from a chapter, 40-90ms on the frozen
+            # build (19 November 2026, three of three). An explicit show
+            # makes the posted one a no-op, and activating the layout
+            # gives the rows their geometry before that paint.
+            for widget in inserted:
+                widget.show()
+            if inserted:
+                self._rows.activate()
         finally:
             self._rows_host.setUpdatesEnabled(True)
             batch, self._still_batch = self._still_batch, None
@@ -5679,7 +5696,7 @@ class GenreBrowsePage(GlassPage):
                      or ("Manga" if self._is_reading else "Series"))
 
 
-def open_details(window, entry, host=None):
+def open_details(window, entry, host=None, register=True):
     """Put the details page over `window`. The one entry point - the same
     central-widget host trick reader.open_reader documents, so the
     sidebar is covered rather than hidden.
@@ -5694,6 +5711,12 @@ def open_details(window, entry, host=None):
     genre and the cast pages still do not open on clicking the cards,
     instead if I click one it will take me to it when I click the back
     button"* - it had opened every time, behind.
+
+    `register=False` is for the two callers that swap a web view out
+    themselves and register after the swap (web_pages._open_overlay,
+    web_reader._open_card - cover_with). Everything else is registered
+    here, so a reader or player opened over this page cannot bring the
+    web page underneath back up when it closes (web_pages.overlay_over).
     """
     if host is None:
         host = (window.overlay_host() if hasattr(window, "overlay_host")
@@ -5746,6 +5769,12 @@ def open_details(window, entry, host=None):
         entrance.start()
     page.raise_()
     freeze_covered(page)   # see widgets._CoveredFreeze
+    if register:
+        try:
+            from windows import web_pages
+            web_pages.overlay_over(page)
+        except Exception:
+            logs.exception("The details page could not register as an overlay")
     page.setFocus()
     # **And the keyboard itself, which setFocus cannot move.** The owner, 5
     # November 2026: "the search for the ep or ch ... does not write!!!!!".

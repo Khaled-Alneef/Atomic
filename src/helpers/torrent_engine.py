@@ -654,6 +654,11 @@ def _alert_pump():
 # dropping peers), long enough that rebuilding a 20,000-entry priority
 # array is nothing - _serve already does it once per 8MB served.
 WINDOW_TICK_S = 1.0
+# How long a torrent stays off libtorrent's queue after its last reader -
+# see _Torrent.hold_off_queue. Long enough to cover a pause, a seek's
+# reconnect and the gaps while mpv's cache is full; a torrent left alone
+# longer than this is queued like any other again.
+QUEUE_HOLD_S = 120.0
 
 
 _RESUME_SAVE_INTERVAL_S = 20.0
@@ -699,6 +704,7 @@ def _window_ticker():
             if torrent.want_whole or torrent.file_index is None:
                 continue
             try:
+                torrent.hold_off_queue()
                 torrent.refresh_windows()
             except Exception:
                 pass
@@ -920,6 +926,10 @@ class _Torrent:
         self.served_hwm = {}
         self.file_index = None
         self.last_touched = time.time()
+        # When a reader last held this torrent, and whether hold_off_queue
+        # is what took it off libtorrent's queue - see there.
+        self.read_seen_at = 0.0
+        self._held_off_queue = False
         # Byte offset playback is going to *start* at, when a resume
         # point says it is not zero. Kept wanted through every focus()
         # the same way the index is - see RESUME_BAND_BYTES.
@@ -963,6 +973,10 @@ class _Torrent:
         # and the seat poll asks every couple of seconds.
         self._index_tables = None
         self._index_key = None
+        # The Matroska counterpart: the Cues as _cue_table's lookup
+        # table, keyed by ("mkv", file_index, file size).
+        self._cue_index = None
+        self._cue_key = None
 
     # -- geometry -----------------------------------------------------
     @property
@@ -1267,6 +1281,15 @@ class _Torrent:
         on a 217MB test file with the moov at either end, the byte for
         1s, 5s, 8.5s, 30s and 61.7s is the keyframe's own `pos` every
         time (499, 499, 499, 11075272, 27139413)."""
+        # The Cues already parsed for this file answer with no read at all
+        # (see _cue_table for the 132ms a press cost without this). Keyed
+        # by the file, so a pack that moves to another episode re-reads.
+        try:
+            key = ("mkv", self.file_index, self.file_size())
+        except Exception:
+            key = None
+        if key is not None and self._cue_key == key:
+            return _cue_lookup(self._cue_index, seconds)
         if self.container_kind() == "mp4":
             return self._resolve_mp4_start(seconds)
         head = self.read_present(0, 256 * 1024)
@@ -1292,7 +1315,12 @@ class _Torrent:
         cues = self.read_present(cues_at + pos, size)
         if not cues:
             return None
-        return _cue_byte_for(head, cues, segment_start, scale, seconds)
+        table = _cue_table(cues, segment_start, scale)
+        if table is None:
+            return None
+        if key is not None:
+            self._cue_index, self._cue_key = table, key
+        return _cue_lookup(table, seconds)
 
     def _resolve_mp4_start(self, seconds):
         """The MP4 half of resolve_start: the byte of the last sync
@@ -1391,6 +1419,57 @@ class _Torrent:
             self.last_offset = int(offset_in_file)
             windows = list(self.readers.values())
         self._apply_windows(windows)
+
+    def hold_off_queue(self, now=None):
+        """Keep a torrent somebody is watching out of libtorrent's queue.
+
+        **A full window is a finished torrent, and the queue pauses
+        finished torrents.** The owner's frozen run, 19 November 2026:
+        five arrow presses on Brooklyn Nine-Nine over a 2.3MB/s lane, and
+        "Skipping To 2:43..." for **40 seconds** before the picture came
+        back. Everything outside the window is priority 0, so the moment
+        the window's pieces are all here libtorrent counts the torrent
+        as finished - queued like a seed - and _make_session gives seeds
+        no active slot (`active_seeds` 0). The torrent is paused, every
+        peer is disconnected ("torrent paused" in the engine's own peer
+        alerts), and the next press's pieces wait for the queue's next
+        pass and a fresh round of handshakes.
+
+        Measured with the real engine and libmpv on his Attack on Titan
+        S04E22 (4MiB pieces, one local seeder throttled to 0.6MB/s - his
+        lane's 1.78x of the file's rate), four +5s presses 6s apart:
+        control - three "torrent paused" disconnects and the fourth press
+        still not playing after 60s (4.0s, 5.0s, 12.5s, never); with the
+        queue kept off the torrent - no pause, 1.6s, 6.0s, 11.5s, 5.5s,
+        which is the target's piece arriving at the lane's rate.
+
+        Not by raising `active_seeds`: that would keep every *complete*
+        torrent seeding in the background too, which is a different
+        decision. And not by clearing auto_managed in add(): that was
+        measured breaking startup outright (see the note there). So only
+        a torrent a reader is on, or was on in the last QUEUE_HOLD_S, is
+        held; it goes back to the queue after that, and only if this is
+        what took it off."""
+        now = time.time() if now is None else now
+        with self.lock:
+            live = any(key != PRIMARY_READER for key in self.readers)
+        if live:
+            self.read_seen_at = now
+        watched = live or now - self.read_seen_at < QUEUE_HOLD_S
+        try:
+            managed = bool(int(self.handle.flags()) & int(lt.torrent_flags.auto_managed))
+            if watched and managed:
+                self.handle.unset_flags(lt.torrent_flags.auto_managed)
+                self.handle.resume()
+                self._held_off_queue = True
+                logs.info(f"queue: {self.info_hash[:8]} held off the queue while it is watched")
+            elif not watched and not managed and self._held_off_queue:
+                self.handle.set_flags(lt.torrent_flags.auto_managed)
+                self._held_off_queue = False
+                logs.info(f"queue: {self.info_hash[:8]} back on the queue - "
+                          f"nothing read it for {QUEUE_HOLD_S:.0f}s")
+        except Exception:
+            pass
 
     def refresh_windows(self):
         """Re-apply the current windows without moving them.
@@ -2022,16 +2101,23 @@ def _matroska_layout(head: bytes):
         return None
 
 
-def _cue_byte_for(head: bytes, cues: bytes, segment_start: int, scale: int,
-                  seconds: float):
-    """The byte a seek to `seconds` will actually read, or None.
+def _cue_table(cues: bytes, segment_start: int, scale: int):
+    """The Cues as a lookup table, or None: `(times_ns, bytes)`, sorted
+    by time, where bytes[i] is the furthest cluster any cue up to times[i]
+    names - so _cue_lookup answers exactly what a walk of every cue at or
+    before the target would (the largest such byte), by bisection.
 
-    The last cue at or before the target, which is where a demuxer lands
-    - so this is the offset mpv is about to ask for, not an estimate of
-    it."""
+    **Parsed once per file, not once per seek.** The owner, 19 November
+    2026: "in the video player when I press right or left arrows it takes
+    some time to move forw/back like ~100 ms". Every arrow press asks
+    seat_on_disk before mpv is told anything, and that walked the whole
+    Cues element in Python on the UI thread each time. Measured on the
+    real engine with his Attack on Titan S04E22 (471MB, 868KB of Cues,
+    16MiB pieces, seeded locally): seat_on_disk 131.8ms median per press
+    - head read 12.2ms, Cues read 1.6ms, the walk 102.2ms - while mpv's
+    own exact seek on the same file lands in 33ms."""
     try:
-        target_ns = float(seconds) * 1e9
-        best = None
+        points = []
         for element, start, stop in _ebml_children(cues, 0, len(cues)):
             if element != _EBML_CUEPOINT:
                 continue
@@ -2047,9 +2133,28 @@ def _cue_byte_for(head: bytes, cues: bytes, segment_start: int, scale: int,
                                                  sub_stop - sub_start)
             if cue_time is None or cluster is None:
                 continue
-            if cue_time * scale <= target_ns:
-                best = max(best or 0, segment_start + cluster)
-        return best
+            points.append((cue_time * scale, segment_start + cluster))
+        if not points:
+            return None
+        points.sort(key=lambda point: point[0])
+        times, furthest, best = [], [], 0
+        for time_ns, byte in points:
+            best = max(best, byte)
+            times.append(time_ns)
+            furthest.append(best)
+        return times, furthest
+    except Exception:
+        return None
+
+
+def _cue_lookup(table, seconds: float):
+    """The byte a seek to `seconds` will actually read, or None - the
+    last cue at or before the target, which is where a demuxer lands, so
+    this is the offset mpv is about to ask for, not an estimate of it."""
+    try:
+        times, furthest = table
+        at = bisect.bisect_right(times, float(seconds) * 1e9) - 1
+        return furthest[at] if at >= 0 else None
     except Exception:
         return None
 
@@ -3608,6 +3713,33 @@ def payload_rate(info_hash: str) -> int:
         return int(torrent.handle.status().download_payload_rate)
     except Exception:
         return 0
+
+
+def warm_seek_index(info_hash: str) -> bool:
+    """Parse the playing file's seek index now, on a thread of its own,
+    so the first arrow press finds it ready (_cue_table: the parse is
+    the 132ms a press used to pay on the UI thread). Called by the player
+    at its first frame, when the index is on disk for any file that has
+    one. Nothing is cached if it is not there yet; a later press then
+    parses it, as before."""
+    torrent = _torrents.get((info_hash or "").lower())
+    if torrent is None:
+        return False
+
+    def run():
+        started = time.perf_counter()
+        try:
+            torrent.resolve_start(0.0)
+        except Exception:
+            pass
+        table = torrent._cue_index if torrent._cue_key else None
+        what = (f"{len(table[0])} cues" if table
+                else "mp4 tables" if torrent._index_tables else "not on disk yet")
+        logs.info(f"seek index: {(info_hash or '')[:8]} {what}, "
+                  f"{(time.perf_counter() - started) * 1000:.0f}ms off the UI thread")
+
+    threading.Thread(target=run, name="seek-index", daemon=True).start()
+    return True
 
 
 def seat_on_disk(info_hash: str, seconds):
