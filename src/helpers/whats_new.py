@@ -30,6 +30,18 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.27": [
+        "Kolnovel novels list their chapters again - the site changed its "
+        "design and every title showed none. Long novels show their whole "
+        "list in about a second and fill in the rest while you read.",
+        "Kolnovel search finds titles again, and a novel's page shows its "
+        "real cover, genres and story instead of the site's logo.",
+        "Novel Fire chapters no longer fail to open right after their "
+        "chapter list loads.",
+        "The reader's top bar no longer flickers when the pointer rests on "
+        "an empty part of it, and the word count stays fully in view when "
+        "the bar is folded.",
+    ],
     "3.26": [
         "Going back from a chapter now lands straight on the chapter "
         "list - no flash of the main page first, and the list no longer "
