@@ -103,6 +103,9 @@ def _lib_dir():
 # simply scrolls as it did before.
 _BROWSER_ARGS = "--disable-smooth-scrolling"
 
+# Whether the runtime's version has been logged yet (see _ready).
+_RUNTIME_SAID = False
+
 # How many times a navigation that did not arrive is asked for again
 # before the view gives up and says so - see _navigated.
 NAV_RETRIES = 3
@@ -682,6 +685,19 @@ class WebView2Page(QWidget):
             if core is None:
                 logs.info("WebView2 init completed with no core")
                 return
+            # **The runtime's version, once a process.** Behaviour that
+            # belongs to the runtime differs between machines: the
+            # reader's bar stuttered over its drag region on a friend's
+            # machine and never here (runtime 157, 19 November 2026), and
+            # nothing in his log could say which runtime he had.
+            global _RUNTIME_SAID
+            if not _RUNTIME_SAID:
+                _RUNTIME_SAID = True
+                try:
+                    logs.info("WebView2: runtime "
+                              + str(core.Environment.BrowserVersionString))
+                except Exception:
+                    pass
 
             # **Adopted only now.** Re-parenting the form before this
             # point destroys the very HWND the controller is being built

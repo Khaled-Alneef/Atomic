@@ -1829,6 +1829,36 @@ function launcherMenu(button, bar) {
   });
 }
 
+/* **The reader's top bar follows the pointer's position** (app.css
+   .rbar.shown says why :hover could not be trusted with it). Shown while
+   the pointer is in the top READER_BAR_REACH_PX (the old .rreach strip)
+   or on anything inside the bar - its launcher menu hangs below it - and
+   hidden by the first move that is neither. A pointer that leaves the
+   page while the bar is up is either over the bar's drag region or out
+   of the window across its top edge; both keep the bar, and the next
+   move inside the page decides again. That leave is said once a session,
+   so a report from another machine arrives with its cause attached. */
+const READER_BAR_REACH_PX = 72;
+let readerBar = null;
+let readerBarLeaveSaid = false;
+let readerBarY = -1;
+document.addEventListener('pointermove', function (e) {
+  const bar = readerBar;
+  if (!bar || !bar.isConnected) return;
+  readerBarY = e.clientY;
+  bar.classList.toggle('shown',
+    e.clientY < READER_BAR_REACH_PX || bar.contains(e.target));
+}, { passive: true });
+document.addEventListener('pointerout', function (e) {
+  if (e.relatedTarget) return;                 // still inside the page
+  const bar = readerBar;
+  if (!bar || !bar.isConnected || !bar.classList.contains('shown')) return;
+  if (readerBarLeaveSaid) return;
+  readerBarLeaveSaid = true;
+  tellHost({ action: 'diag', what: 'reader bar held',
+             y: Math.round(readerBarY), fs: document.body.classList.contains('fs') ? 1 : 0 });
+}, { passive: true });
+
 async function openChapter(id, index) {
   if (launcherClose) launcherClose();
   // The zoom survives a chapter change - it is the reader's setting,
@@ -1916,6 +1946,7 @@ async function openChapter(id, index) {
   topbar.appendChild(right);
   topbar.appendChild(label);
   page.appendChild(topbar);
+  readerBar = topbar;
 
   // **The chapter controls, on the floor.** reader.BOTTOM_HEIGHT is 60
   // and _build_bottom puts them left to right as previous, the jump

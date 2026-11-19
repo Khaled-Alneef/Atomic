@@ -311,8 +311,12 @@ def _kol_cards(site, body) -> list:
         link = re.search(r'href="(https?://[^"]+/series/[^"]+)"', block)
         if not link:
             continue
-        title = (re.search(r'<h2[^>]*>.*?<a[^>]*>(.*?)</a>', block, re.S)
-                 or re.search(r'title="([^"]+)"', block))
+        # The search page's cards name the title in an <h3> since the
+        # 19 November 2026 theme (with aria-label on the cover link);
+        # the series archive still uses <h2>.
+        title = (re.search(r'<h[23][^>]*>.*?<a[^>]*>(.*?)</a>', block, re.S)
+                 or re.search(r'title="([^"]+)"', block)
+                 or re.search(r'aria-label="([^"]+)"', block))
         cover = re.search(r'<img[^>]+(?:data-src|src)="([^"]+)"', block)
         if title:
             rows.append(_row(site, title.group(1), link.group(1),
@@ -331,36 +335,187 @@ def _kol_browse(site, page, deadline):
 
 
 def _kol_details(site, entry, deadline):
+    """**Both themes** (19 November 2026). The new one files the genres
+    as plain /genre/ links in `kol-series-editorial__genres` (no
+    rel="tag"), the synopsis in `kol-series-editorial__prose`, and the
+    cover as the image in `kol-series-editorial__cover` - and its
+    og:image is the **site's logo**, the same file on every series, so
+    it is never taken as a cover there: measured, the old fallback handed
+    every title the logo."""
     body = _get(entry["url"], deadline, keep=True)
-    links = [{"name": genre_in_english(_text(name)), "url": href}
-             for href, name in re.findall(
-                 r'<a[^>]+href="([^"]*/genre/[^"]*)"[^>]*rel="tag"[^>]*>(.*?)</a>',
-                 body, re.S)]
+    editorial = "kol-series-editorial" in body
+    if editorial:
+        block = re.search(r'class="kol-series-editorial__genres"(.*?)</div>\s*</div>', body, re.S)
+        pairs = re.findall(r'<a[^>]+href="([^"]*/genre/[^"]*)"[^>]*>(.*?)</a>',
+                           block.group(1) if block else "", re.S)
+    else:
+        pairs = re.findall(r'<a[^>]+href="([^"]*/genre/[^"]*)"[^>]*rel="tag"[^>]*>(.*?)</a>',
+                           body, re.S)
+    links = [{"name": genre_in_english(_text(name)), "url": href} for href, name in pairs]
     genres = [link["name"] for link in links]
     summary = ""
-    found = re.search(r'class="[^"]*\bsersys\b[^"]*"[^>]*>(.*?)</div>', body, re.S)
+    found = (re.search(r'class="[^"]*\bkol-series-editorial__prose\b[^"]*"[^>]*>(.*?)</div>', body, re.S)
+             or re.search(r'class="[^"]*\bsersys\b[^"]*"[^>]*>(.*?)</div>', body, re.S))
     if found:
         summary = "\n\n".join(_paragraphs(found.group(1)))
-    cover = re.search(r'class="sertothumb".*?<img[^>]+src="([^"]+)"', body, re.S)
-    return {"summary": summary or _meta(body, "og:description"),
+    cover = (re.search(r'class="[^"]*\bkol-series-editorial__cover\b[^"]*"[^>]*>\s*<img[^>]+src="([^"]+)"',
+                       body, re.S)
+             or re.search(r'class="sertothumb".*?<img[^>]+src="([^"]+)"', body, re.S))
+    # og:description is the site's slogan under the new theme, the same on
+    # every page (the 79-character "summary" measured before this fix).
+    fallback = (lambda name: "") if editorial else (lambda name: _meta(body, name))
+    return {"summary": summary or fallback("og:description"),
             "genres": genres, "genre_links": links,
-            "cover_url": cover.group(1) if cover else _meta(body, "og:image")}
+            "cover_url": cover.group(1) if cover else fallback("og:image")}
 
 
-def _kol_chapters(site, entry, deadline):
-    body = _get(entry["url"], deadline, keep=True)
-    lister = body[body.find("eplister"):]
-    rows = []
-    for item in re.findall(r"<li\b[^>]*data-ID=\"\d+\"[^>]*>(.*?)</li>", lister, re.S | re.I):
-        link = re.search(r'href="([^"]+)"', item)
-        if not link:
+# **The chapter list is paginated now, 24 to a page** (19 November 2026,
+# his report: "Kolnovel why is not opening the chapters???"). kolnovel
+# moved to a new theme ("kol-series-editorial"): no `eplister` any more,
+# so the old parse began at find() == -1 and every title listed **0
+# chapters** in his log, while the chapter pages themselves still read
+# (44 paragraphs in 0.43s through _kol_text, unchanged). The series page
+# now shows its newest 24; the rest is `?chapter_volume=__kol_all__&
+# chapter_order=oldest&chapter_page=N`, and how many pages the
+# `__kol_all__` volume has is on its <details> (`data-kol-volume-pages`).
+# No per-page setting is honoured (chapter_per_page, per_page: 24 both),
+# app/v2 has no chapter route (404) and wp/v2's posts answer 403.
+#
+# Measured on his longest, every page answering:
+#     Martial God Asura   218 pages  5,211 chapters  23.95s at 6 at once
+#     Perfect World        85 pages  2,027 chapters   7.53s at 10 at once
+# far over rule 7's second, so the list is handed over early - see
+# _kol_chapters.
+_KOL_PER_PAGE = 24
+_KOL_PAGES_AT_ONCE = 8
+_KOL_ROW_RE = re.compile(
+    r'<li class="kol-series-chapter"[^>]*\bdata-ID="(\d+)"[^>]*>(.*?)</li>', re.S | re.I)
+# A chapter whose page has not been read yet: "row r of oldest-first page
+# p", which only that page can turn into an address (_kol_resolve).
+_KOL_PLACE = "#kol-row-"
+
+
+def _kol_page_url(series_url, page) -> str:
+    return (series_url.split("?")[0].split("#")[0]
+            + f"?chapter_volume=__kol_all__&chapter_order=oldest&chapter_page={int(page)}")
+
+
+def _kol_rows(body) -> list:
+    """(url, label) for each chapter row of one list page, in page order."""
+    rows, seen = [], set()
+    for chapter_id, item in _KOL_ROW_RE.findall(body):
+        link = re.search(r'kol-series-chapter__link"\s+href="([^"]+)"', item) \
+            or re.search(r'href="([^"]+)"', item)
+        if not link or chapter_id in seen:
             continue
-        num = re.search(r'class="epl-num"[^>]*>(.*?)</div>', item, re.S)
-        name = re.search(r'class="epl-title"[^>]*>(.*?)</div>\s*</div>', item, re.S)
-        rows.append((link.group(1), _text(num.group(1)) if num else "",
-                     _text(name.group(1)) if name else ""))
-    # Newest first on the page; numbered from the oldest.
-    return [(url, " - ".join(p for p in (num, name) if p)) for url, num, name in rows][::-1]
+        seen.add(chapter_id)
+        num = re.search(r'class="kol-series-chapter__number"[^>]*>(.*?)</span>\s*</span>',
+                        item, re.S)
+        name = re.search(r'data-kol-chapter-title[^>]*>(.*?)</span>', item, re.S)
+        label = " - ".join(p for p in (_text(num.group(1)) if num else "",
+                                       _text(name.group(1)) if name else "") if p)
+        rows.append((html.unescape(link.group(1)), label))
+    return rows
+
+
+def _kol_page_count(body):
+    found = re.search(r'data-kol-chapter-volume="__kol_all__"[^>]*'
+                      r'data-kol-volume-pages="(\d+)"', body)
+    return int(found.group(1)) if found else None
+
+
+def _kol_resolve(url, deadline) -> str:
+    """A placeholder's real address: the row it names on the page it names
+    (read through the page cache, so a run of chapters off one page costs
+    one request). Anything else is already an address."""
+    at = url.rfind(_KOL_PLACE)
+    if at < 0:
+        return url
+    rows = _kol_rows(_get(url[:at], deadline, keep=True))
+    row = int(url[at + len(_KOL_PLACE):])
+    if not 1 <= row <= len(rows):
+        raise LookupError(f"kolnovel list page has {len(rows)} rows, not {row}")
+    return rows[row - 1][0]
+
+
+def _kol_chapters(site, entry, deadline, partial=None):
+    """Oldest first, every position filled.
+
+    Pages in oldest-first order are fixed: chapter n is row
+    (n - 1) % 24 + 1 of page ceil(n / 24). So page 1 and the last page -
+    two requests, 1.2-1.6s measured - give the exact count, every
+    chapter not read yet is a placeholder that _kol_resolve turns into
+    its address on demand, and `partial` gets that whole list at once.
+    It is stored (chapter_source.list_chapters), and the reader opens a
+    chapter by its position in the stored list, so a list with gaps would
+    open the wrong one; this one has the final list's chapters at the
+    final list's positions. The other pages then come in newest first -
+    the end of the list is what a reader is near - and a page that still
+    fails after a retry keeps its placeholders rather than leaving a
+    hole."""
+    series = entry["url"]
+    first = _get(_kol_page_url(series, 1), deadline, keep=True)
+    pages = {1: _kol_rows(first)}
+    count = _kol_page_count(first) or 1
+    if count > 1:
+        try:
+            pages[count] = _kol_rows(_get(_kol_page_url(series, count), deadline, keep=True))
+        except Exception:
+            pages[count] = None
+
+    def listed():
+        out = []
+        for page in range(1, count + 1):
+            rows = pages.get(page)
+            if rows:
+                out.extend(rows)
+                continue
+            # The last page's size is only known once it has been read;
+            # unread, it is taken as full, and the complete list says
+            # otherwise when it lands.
+            out.extend((_kol_page_url(series, page) + f"{_KOL_PLACE}{row}", "")
+                       for row in range(1, _KOL_PER_PAGE + 1))
+        return out
+
+    if not pages[1]:
+        # Not the paginated theme: the series page as it was before
+        # 19 November 2026, every chapter in its `eplister`, newest first.
+        body = _get(series, deadline, keep=True)
+        lister = body[max(body.find("eplister"), 0):]
+        rows = []
+        for item in re.findall(r"<li\b[^>]*data-ID=\"\d+\"[^>]*>(.*?)</li>", lister, re.S | re.I):
+            link = re.search(r'href="([^"]+)"', item)
+            if not link:
+                continue
+            num = re.search(r'class="epl-num"[^>]*>(.*?)</div>', item, re.S)
+            name = re.search(r'class="epl-title"[^>]*>(.*?)</div>\s*</div>', item, re.S)
+            rows.append((link.group(1), " - ".join(
+                p for p in (_text(num.group(1)) if num else "",
+                            _text(name.group(1)) if name else "") if p)))
+        return rows[::-1]
+
+    rest = [page for page in range(count - 1, 1, -1)]
+    if rest and partial is not None and pages.get(count):
+        try:
+            partial(listed())
+        except Exception:
+            pass
+
+    def one(page):
+        for _ in range(2):          # a missed page is a stretch of placeholders
+            try:
+                return page, _kol_rows(_get(_kol_page_url(series, page), deadline, keep=True))
+            except Exception:
+                continue
+        return page, None
+
+    if rest:
+        with concurrent.futures.ThreadPoolExecutor(_KOL_PAGES_AT_ONCE) as pool:
+            for page, rows in pool.map(one, rest):
+                pages[page] = rows
+    if pages.get(count) is None and count > 1:
+        pages[count] = one(count)[1]
+    return listed()
 
 
 # Kolnovel salts every chapter with decoy paragraphs: copies of other
@@ -385,7 +540,7 @@ def _hidden_classes(body) -> set:
 
 
 def _kol_text(site, chapter, deadline):
-    body = _get(chapter["url"], deadline)
+    body = _get(_kol_resolve(chapter["url"], deadline), deadline)
     segment = _until_div(body, 'id="kol_content"')
     hidden = _hidden_classes(body)
     lines = []
@@ -694,14 +849,45 @@ _SCRIPT_REDIRECT = re.compile(
     r"""(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']""")
 _NF_HOPS = 2
 
+# **The mirror is asked first, and novelfire.net only when it has nothing**
+# (19 November 2026). His log: "chapter text on novelfire failed:
+# HTTPError (Too Many Requests)". The chapter list is novelfire.net's own
+# pages - 33 for Shadow Slave, six at a time - and novelfire.net then
+# answers 429 to the next request for about ten seconds (Retry-After 8,
+# 7, 5, 4, 2, 0, measured, 200 again at +10.6s), so a chapter opened
+# right after its list, or the read-ahead of the next one, was refused at
+# its first hop. The mirror holding the text answered the same chapter
+# 200 in 0.36s inside that window: it is another host with its own
+# limit. So the chapter's own path is asked of the mirror directly
+# (`/book/<slug>/chapter-<N>` -> `/novel/<slug>/chapter-<N>`, the shape
+# every hand-off has had), learned from the last hand-off seen and
+# seeded with the one measured today; when the mirror has no text the
+# hand-off chain runs as before, and teaches the new mirror.
+_NF_CHAPTER_PATH = re.compile(r"/book/([^/]+)/(chapter-[^/?#]+)")
+_nf_mirror = "novelphoenix.com"
+
 
 def _nf_text(site, chapter, deadline):
+    global _nf_mirror
     url = chapter["url"]
+    path = _NF_CHAPTER_PATH.search(url)
+    mirror = _nf_mirror
+    if path and mirror:
+        try:
+            lines = _paragraphs(_until_div(
+                _get(f"https://{mirror}/novel/{path.group(1)}/{path.group(2)}", deadline),
+                'id="content"'))
+            if lines:
+                return lines
+        except Exception as exc:
+            logs.info(f"novels: novelfire mirror {mirror} did not answer: {net.why(exc)}")
     for _hop in range(_NF_HOPS + 1):
         body = _get(url, deadline)
         lines = _paragraphs(_until_div(body, 'id="content"'))
         moved = None if lines else _SCRIPT_REDIRECT.search(body)
         if not moved:
+            if lines and _hop and "/novel/" in url:
+                _nf_mirror = _host(url)
             return lines
         url = urllib.parse.urljoin(url, moved.group(1).replace("\\/", "/"))
         logs.info(f"novels: novelfire chapter handed off to {_host(url)}")
@@ -843,7 +1029,7 @@ def chapters(entry, deadline=None, on_partial=None) -> list:
     started = time.perf_counter()
     op = _OPS[site["id"]][3]
     try:
-        if site["id"] == "novelfire" and on_partial is not None:
+        if site["id"] in ("novelfire", "kolnovel") and on_partial is not None:
             listed = op(site, dict(entry), deadline,
                         partial=lambda rows: on_partial(_shaped(site, rows))) or []
         else:

@@ -401,7 +401,18 @@ header p { margin: 6px 0 0; color: var(--dim); font-size: 12px; }
   transform: translateY(-104%);
   transition: transform .16s ease-out;
 }
-.rreach:hover ~ .rbar, .rbar:hover { transform: translateY(0); }
+/* **Shown by app.js from where the pointer is, never by :hover** (19
+   November 2026). His friend's report: the bar stuttered while reading a
+   novel and stopped once he clicked it. The bar's empty parts are a
+   drag region (below), which WebView2 hit-tests as the window's caption,
+   so a pointer resting on them can be outside the page as far as the
+   page knows - :hover drops, the bar slides away, the pointer is over
+   the reach strip again, the bar slides back, at the transition's pace.
+   Whether hover survives a drag region is the runtime's business and
+   differs between machines (it never stuttered here, runtime 157), so
+   the bar no longer asks: readerBarMove decides from the pointer's own
+   position and a leave into the caption changes nothing. */
+.rbar.shown { transform: translateY(0); }
 /* **And while one of its controls is in use.** The owner, 10 October
    2026: "make the upper bar in the novels keeps appearing if I am
    opening the font types list!!!!!!". An open dropdown's list is drawn
@@ -427,6 +438,20 @@ body.fs .rbar { app-region: no-drag; -webkit-app-region: no-drag; }
 .rbtn:disabled { opacity: .38; cursor: default; }
 .rlabel { position: absolute; right: 18px; bottom: -18px;
           color: var(--dim); font-size: 11px; pointer-events: none; }
+/* **Folded, the label is pulled clear of the window's edge** (the owner,
+   19 November 2026: "when the bar is folded the words number does not
+   appear fully"). It hangs 18px under the bar, so the bar's -104% took
+   it up with it: measured on the frozen build, folded, its ink began on
+   the window's third pixel row - pressed against the edge. It still
+   rides the bar down when the bar unfolds ("make it like before moves
+   down when unfolding" - a first cut that held it still was undone at
+   his word); folded it sits 8px lower, on the bar's own curve and
+   duration, so the whole line is on screen. */
+.rbar .rlabel {
+  transform: translateY(8px);
+  transition: transform .16s ease-out;
+}
+.rbar.shown .rlabel, .rbar:focus-within .rlabel { transform: none; }
 
 /* The two clusters, and the title between them.
 
