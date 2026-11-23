@@ -11331,22 +11331,35 @@ class PlayerPage(GlassPage):
         of 196MB on disk ahead of the reader, about three minutes at the
         test's rate, while mpv's cache can only ever hold 64MiB.
 
-        A byte becomes a time in proportion to the file (size against
-        duration). That is exact for a constant bitrate and close for
-        the usual variable one; the container's index could be exact,
-        but reading the Cues off disk once a second is not a cost a
-        drawing should pay. The band is the larger of this and mpv's
-        own reach, so it never shows less than before."""
+        **A byte becomes a time through the file's own seek index**
+        (the Cues, or an MP4's sample tables - parsed once at the first
+        frame by warm_seek_index, so this reads a table and parses
+        nothing). It used to be in proportion to the file, and the
+        owner's 23 November 2026 screenshot is what that cost: "why is
+        it loading while it says that there is ~60 sec loaded already".
+        On his Mythic Quest S02E05 the proportion put the playhead 80MiB
+        behind the byte mpv was reading and the next missing piece 63s
+        ahead of it, while the stream sat on that very piece for 29.5s -
+        nothing was ahead at all (torrent_engine.on_disk has the
+        numbers). The proportion stays only for a file without an index.
+        The band is the larger of this and mpv's own reach."""
         reach = 0.0
         try:
             torrent_hash = self._engine_hash
             duration = float(self._duration or 0.0)
             if torrent_hash and duration > 0:
                 from helpers import torrent_engine
+                position = float(self._position or 0.0)
                 found = torrent_engine.on_disk(
-                    torrent_hash,
-                    from_fraction=float(self._position or 0.0) / duration)
-                if found:
+                    torrent_hash, from_fraction=position / duration,
+                    from_seconds=position)
+                if found and "reach_seconds" in found:
+                    exact = found["reach_seconds"]
+                    if exact is None and float(found["reach_fraction"]) >= 1.0:
+                        reach = duration
+                    elif exact is not None:
+                        reach = min(duration, float(exact))
+                elif found:
                     reach = min(duration,
                                 float(found["reach_fraction"]) * duration)
         except Exception:

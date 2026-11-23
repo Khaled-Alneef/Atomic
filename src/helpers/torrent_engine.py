@@ -365,6 +365,11 @@ STREAM_WINDOW_MIN_PIECES = 12
 # the old anchored-to-the-reader behaviour, which is how the A/B in
 # _apply_windows' comment was run.
 WINDOW_SKIP_FACTOR = 4
+# The fewest missing pieces a streaming torrent may want at any moment -
+# see _Torrent._keep_interested. Two, not one: libtorrent says "not
+# interested" the instant the last wanted piece completes, which is up to
+# a WINDOW_TICK_S before the next re-aim could want another.
+KEEP_INTERESTED_PIECES = 2
 
 # How far the reader may advance before the window is slid forward.
 # Sliding on every served byte would rewrite a 40,000-entry priority
@@ -449,6 +454,12 @@ TAIL_BYTES = 4 * 1024 * 1024
 # all. 4MB is comfortably past any Matroska/MP4 header; it was two pieces,
 # which is 4MB on 2MB pieces and 32MB on the 16MB pieces of his season packs.
 RESUME_HEADER_BYTES = 4 * 1024 * 1024
+
+# Past the first Cluster's start, how much of it a resume's header read is
+# allowed to want - the demuxer reads that element's header before it jumps
+# (see _Torrent._resume_header_last). 64KB never reaches a second piece
+# unless the header itself ends at a piece boundary.
+MKV_CLUSTER_PEEK = 64 * 1024
 
 # **Where playback is going to start, when that is not the beginning.**
 #
@@ -973,10 +984,22 @@ class _Torrent:
         # and the seat poll asks every couple of seconds.
         self._index_tables = None
         self._index_key = None
+        # Which file of the torrent those tables are for. The moov key
+        # alone cannot say without reading the file again, and a pack
+        # moves to another episode in place (file_index changes); a
+        # reader that must not read (on_disk, once a second on the UI
+        # thread) checks this instead.
+        self._index_file = None
         # The Matroska counterpart: the Cues as _cue_table's lookup
         # table, keyed by ("mkv", file_index, file size).
         self._cue_index = None
         self._cue_key = None
+        # Pieces this torrent has given a deadline since its deadlines
+        # were last cleared - see _set_deadline for why a deadline is set
+        # once and then left alone. Written by the window ticker, the
+        # stream server's waits and await_start, hence the lock.
+        self._deadlined = set()
+        self._deadline_lock = threading.Lock()
 
     # -- geometry -----------------------------------------------------
     @property
@@ -1001,6 +1024,109 @@ class _Torrent:
             return self.handle.have_piece(piece)
         except Exception:
             return False
+
+    # -- deadlines ----------------------------------------------------
+    def _set_deadline(self, piece: int, ms: int) -> None:
+        """Give `piece` a deadline **once**, and leave it alone after.
+
+        **Re-setting a deadline is what starved the piece playback was
+        blocked on**, the owner's 23 November 2026 "why is it loading"
+        (Mythic Quest S02E05, his log: 18-29s per piece, `waited 29.5s
+        for piece 371`). libtorrent only re-asks a late piece's busy
+        blocks from another peer once that piece counts as late, and a
+        deadline wiped and re-set every second (`_apply_windows` cleared
+        them all on each tick) or every 100ms (`wait_for`, `await_start`)
+        never got there. What that looked like, his release, real engine:
+        124 of the blocked piece's 125 blocks written and the last one
+        requested from a peer at 1-2KB/s for 10-20s while another peer
+        sent 500-700KB/s. Measured, alternated against the same swarm,
+        reader at the episode's 1.47MB/s from his seat (scratch
+        deadline_ab.py): re-set every tick, first byte 63.5s and 39.5s
+        after the seat was known and 66MB / 24MB served in 90s, behind
+        the picture; set once, 6.5s and 0.5s and 132MB both times, at
+        playback pace. The same release downloading with no window at all
+        ran 13-27MB/s - the swarm was never the problem."""
+        with self._deadline_lock:
+            if piece in self._deadlined:
+                return
+            try:
+                self.handle.set_piece_deadline(piece, ms)
+                self._deadlined.add(piece)
+            except Exception:
+                pass
+
+    def _keep_interested(self, priorities, windows, file_first, file_last):
+        """Never hand libtorrent a priority array whose every wanted piece
+        is already on disk: also want the first missing piece after the
+        newest reader (or, past the end, the first missing one at all).
+
+        **Wanting nothing for a moment costs a minute.** With nothing
+        wanted libtorrent tells every peer it is not interested; a seed
+        then closes the connection (to it we are a redundant peer), and
+        this session does not dial it again for `min_reconnect_time`,
+        60s. The owner's opening stall of 23 November 2026 (Mythic Quest
+        S02E05, his seat 7:14): the picture at 62-68s on runs of the old
+        and the new deadline code alike, with the piece at the seat at
+        priority 7 requested from nobody and two peers left, both choking
+        us, until the others came back at 66-71s. Sampled every 0.25s
+        from add(): "nothing missing is wanted" for one sample, and 0.3s
+        later the seed that was sending 1.9MB/s was gone; that run had no
+        picture in 100s.
+
+        Where the empty array came from: while a resume is pending the
+        window shrinks to the urgent band (one to four pieces) and the
+        scan for the first missing piece is bounded at four windows, so a
+        seat band already on disk ahead of the reader left a window made
+        only of pieces this machine has."""
+        try:
+            have = self.handle.status(lt.torrent_handle.query_pieces).pieces
+            last = min(file_last, len(have) - 1, len(priorities) - 1)
+            first = max(0, file_first)
+            short = KEEP_INTERESTED_PIECES - sum(
+                1 for p in range(first, last + 1)
+                if priorities[p] > 0 and not have[p])
+            if short <= 0:
+                return
+            newest = max(windows, key=lambda w: w[2]) if windows else None
+            start = (max(first, self.piece_at(newest[0]))
+                     if newest is not None else first)
+            for piece in list(range(start, last + 1)) + list(range(first, start)):
+                if short <= 0:
+                    return
+                if not have[piece] and priorities[piece] == 0:
+                    priorities[piece] = 4
+                    short -= 1
+        except Exception:
+            pass
+
+    def _apply_deadlines(self, wanted, priorities) -> None:
+        """Make libtorrent's deadlines `wanted` - `[(piece, ms), ...]` in
+        the order they are needed - touching as little as possible.
+
+        A piece that is on disk, or no longer wanted at all, has left
+        libtorrent's deadline list by itself and is forgotten here. Only
+        when some deadline still points at a piece nobody wants any more -
+        a seek, a reader gone - is the whole list cleared and written
+        again: that is the case the clear was added for (25 August 2026,
+        seeks queued behind every position visited before; the note in
+        _apply_windows). Otherwise only the pieces new to the list get
+        one, so a window sliding forward adds its new tail and leaves the
+        rest late enough to be rescued - see _set_deadline."""
+        desired = {piece for piece, _ms in wanted}
+        with self._deadline_lock:
+            self._deadlined = {
+                piece for piece in self._deadlined
+                if 0 <= piece < len(priorities) and priorities[piece] > 0
+                and not self.have(piece)}
+            stale = self._deadlined - desired
+            if stale:
+                try:
+                    self.handle.clear_piece_deadlines()
+                except Exception:
+                    pass
+                self._deadlined = set()
+        for piece, ms in wanted:
+            self._set_deadline(piece, ms)
 
     def _tail_pieces(self, span_bytes: int = None):
         """The pieces holding the last TAIL_BYTES of the chosen file.
@@ -1071,7 +1197,8 @@ class _Torrent:
         before; `critical` then means the last INDEX_CRITICAL_BYTES, as
         await_start has always asked."""
         try:
-            if self.container_kind() == "mp4":
+            kind = self.container_kind()
+            if kind == "mp4":
                 span = self._moov_span()
                 if span:
                     offset, length = span
@@ -1080,9 +1207,113 @@ class _Torrent:
                     last = self.piece_at(offset + length - 1)
                     return [p for p in range(first, last + 1)
                             if not self.have(p)]
+            elif kind == "mkv":
+                # **The tail the SeekHead names, not a fixed 4MB of it**
+                # (24 November 2026). Mythic Quest S02E05 (GLHF, 2MB
+                # pieces): the Cues are the last 515KB, so TAIL_BYTES
+                # asked for three pieces where two hold everything the
+                # demuxer reads, and on a swarm giving ~1MB/s that piece
+                # was two seconds of the opening. Brooklyn Nine-Nine
+                # S07E01's Cues are the last 32KB.
+                tail_start = self._mkv_tail_start()
+                if tail_start is not None:
+                    return self._tail_pieces(min(self.file_size() - tail_start,
+                                                 MOOV_INDEX_CAP))
+            elif kind is None:
+                # **Before the head says what the file is, the last 1MB,
+                # not 4** (24 November 2026). The head lands within a
+                # couple of seconds and the two branches above then name
+                # the real span, so the wider guess bought nothing but a
+                # piece fetched in the meantime: on GLHF's 2MB pieces,
+                # piece 1022 at the same 1MB/s as the head and the Cues.
+                # Over the 26 Matroska files in this machine's cache the
+                # Cues are 32-621KB from the end; a bigger index (an MP4's
+                # moov, a film's Cues) is widened as soon as it is named.
+                return self._tail_pieces(INDEX_CRITICAL_BYTES)
         except Exception:
             pass
         return self._tail_pieces(INDEX_CRITICAL_BYTES if critical else None)
+
+    def _resume_header_last(self):
+        """The last piece a resume's header read needs: everything before
+        the first Cluster for Matroska (header, tracks, attached fonts),
+        RESUME_HEADER_BYTES for anything else.
+
+        **Read off the file, not guessed** (24 November 2026). 4MB is
+        three pieces on this release's 1.95MiB pieces, and on Mythic Quest
+        S02E05 (GLHF) pieces 1 and 2 were fetched at priority 7 beside
+        the Cues while the whole header ends inside piece 0 - on a swarm
+        at 0.1-0.7MB/s that was 4MB of an opening that needs about 6. A
+        release with megabytes of fonts gets all of them, which 4MB never
+        promised. Until piece 0 is on disk nothing is known and only it
+        is wanted; the walk then asks for each further piece it needs."""
+        try:
+            size = self.file_size()
+            key = (self.file_index, size)
+        except Exception:
+            return None
+        cached = getattr(self, "_header_last_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        first = self.piece_at(0)
+        kind = self.container_kind()
+        if kind is None:
+            return first
+        if kind != "mkv":
+            last = self.piece_at(max(min(RESUME_HEADER_BYTES, size) - 1, 0))
+            self._header_last_cache = (key, last)
+            return last
+        try:
+            pos, segment = 0, False
+            for _ in range(64):
+                span = min(12, size - pos)
+                header = self.read_present(pos, span)
+                if not header:
+                    # The next piece the walk needs (an element header can
+                    # straddle two).
+                    return self.piece_at(pos + span - 1)
+                element, at = _ebml_id(header, 0)
+                length, at = _ebml_size(header, at)
+                if element == _EBML_SEGMENT and not segment:
+                    pos, segment = pos + at, True
+                    continue
+                if element == _EBML_CLUSTER and segment:
+                    last = self.piece_at(min(pos + MKV_CLUSTER_PEEK, size) - 1)
+                    self._header_last_cache = (key, last)
+                    return last
+                if length is None:
+                    break
+                pos += at + length
+                if pos >= size:
+                    break
+        except (IndexError, ValueError, TypeError):
+            pass
+        last = self.piece_at(max(min(RESUME_HEADER_BYTES, size) - 1, 0))
+        self._header_last_cache = (key, last)
+        return last
+
+    def _mkv_tail_start(self):
+        """The first byte past the clusters that the demuxer reads at
+        open - the lowest SeekHead position in the file's second half -
+        or None while the head is not on disk or names nothing there (a
+        file with its Cues at the front keeps them inside the head band).
+        Cached per file, so the once-a-second re-aim reads nothing."""
+        try:
+            key = (self.file_index, self.file_size())
+        except Exception:
+            return None
+        cached = getattr(self, "_tail_start_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        head = self.read_present(0, 256 * 1024)
+        if not head:
+            return None
+        size = key[1]
+        late = [pos for pos in _matroska_seek_positions(head)
+                if size // 2 < pos < size]
+        start = min(late) if late else None
+        self._tail_start_cache = (key, start)
+        return start
 
     def _index_reads_forward(self) -> bool:
         """Which way the demuxer walks the index band: an MP4 reads its
@@ -1344,7 +1575,54 @@ class _Torrent:
             if not tables:
                 return None
             self._index_tables, self._index_key = tables, key
+            self._index_file = self.file_index
         return _mp4_seat_for(tables, seconds)
+
+    def _parsed_index(self):
+        """The playing file's seek index *if it is already parsed* -
+        ("mkv", cue table) or ("mp4", track tables) - else None. Never
+        reads or parses: warm_seek_index does that off the UI thread at
+        the first frame, and this is asked once a second on it."""
+        try:
+            key = ("mkv", self.file_index, self.file_size())
+        except Exception:
+            return None
+        if self._cue_index and self._cue_key == key:
+            return "mkv", self._cue_index
+        if (self._index_tables and self.file_index is not None
+                and self._index_file == self.file_index):
+            return "mp4", self._index_tables
+        return None
+
+    def indexed_byte(self, seconds):
+        """The byte a demuxer at `seconds` is reading - the keyframe at or
+        before it, through the parsed index - or None without one."""
+        index = self._parsed_index()
+        if index is None:
+            return None
+        kind, table = index
+        if kind == "mkv":
+            return _cue_lookup(table, seconds)
+        return _mp4_seat_for(table, seconds)
+
+    def indexed_time(self, offset):
+        """The inverse: the time of the last keyframe whose data starts at
+        or before byte `offset`, or None without a parsed index. A run of
+        bytes ending at `offset` plays at least to here - the keyframe's
+        own cluster may be cut short by `offset`, so this never says more
+        than is there."""
+        index = self._parsed_index()
+        if index is None:
+            return None
+        kind, table = index
+        try:
+            if kind == "mkv":
+                times, furthest = table
+                at = bisect.bisect_right(furthest, int(offset)) - 1
+                return times[at] / 1e9 if at >= 0 else 0.0
+            return _mp4_time_for_byte(table, int(offset))
+        except Exception:
+            return None
 
     def seat_on_disk(self, seconds):
         """Whether the bytes a seek to `seconds` will read are already
@@ -1677,6 +1955,33 @@ class _Torrent:
                 # bounded so a nearly-complete file cannot turn this
                 # into a walk of the whole piece array.
                 scanned, limit = 0, window_pieces * WINDOW_SKIP_FACTOR
+                # **...except a resume's header read, which must stop at the
+                # header** (24 November 2026). The skip above walks the band
+                # on past every piece that lands, and while a seat is owed the
+                # only reader at the head is the header read (or the primary
+                # placeholder standing in for it): Mythic Quest S02E05 (GLHF,
+                # 2MB pieces, a ~5-peer swarm at 0.1-0.7MB/s) fetched head
+                # pieces 1 to 9 at priority 7 - 18MB nobody watches - while
+                # the two tail pieces holding the Cues sat half-done beside
+                # them, and the seat was armed at 53s. The header is what
+                # _resume_header_last reads off the file; once that is on
+                # disk this window wants nothing, and _keep_interested is what stops "nothing" from
+                # costing the swarm.
+                if ((resuming or seat_pending)
+                        and offset < RESUME_HEADER_BYTES):
+                    header_last = self._resume_header_last()
+                    if header_last is None:
+                        header_last = self.piece_at(
+                            min(RESUME_HEADER_BYTES, self.file_size()) - 1)
+                    while start <= header_last and self.have(start):
+                        start += 1
+                    if start > header_last:
+                        continue
+                    band_last = min(header_last, start + urgent_count - 1)
+                    for piece in range(start, band_last + 1):
+                        priorities[piece] = 7
+                    urgent_bands.append((start, band_last))
+                    continue
                 while start < file_last and scanned < limit and self.have(start):
                     start += 1
                     scanned += 1
@@ -1804,6 +2109,7 @@ class _Torrent:
                                min(total_pieces - 1, file_last) + 1):
                 if priorities[piece] == 0:
                     priorities[piece] = fill
+            self._keep_interested(priorities, windows, file_first, file_last)
             handle.prioritize_pieces(priorities)
 
             # **Clear the old deadlines before writing the new ones -
@@ -1827,10 +2133,16 @@ class _Torrent:
             # ~11s at what that swarm gave - which is the honest reason
             # "Skipping to..." is not a one-second operation on a
             # torrent, whatever this fixes.
-            try:
-                handle.clear_piece_deadlines()
-            except Exception:
-                pass
+            #
+            # **Cleared only when a deadline has gone stale, not on every
+            # call** (23 November 2026): this runs once a second, and a
+            # deadline wiped and re-set that often is never late, which is
+            # what libtorrent needs before it re-asks a slow peer's blocks
+            # from a fast one. The deadlines are collected below and
+            # handed to _apply_deadlines, which clears for the case above
+            # and otherwise only adds - see _set_deadline for the
+            # measurement.
+            deadlines = []
 
             # **A deadline on every piece of the window, in order.**
             #
@@ -1849,10 +2161,7 @@ class _Torrent:
             for rank, (band_first, band_last) in enumerate(urgent_bands):
                 base = 200 + rank * 20000
                 for index, piece in enumerate(range(band_first, band_last + 1)):
-                    try:
-                        handle.set_piece_deadline(piece, base + index * 400)
-                    except Exception:
-                        pass
+                    deadlines.append((piece, base + index * 400))
             # The index gets deadlines interleaved with the head's, not
             # behind them: a priority alone only tells the picker what to
             # prefer, and the measured stall was the demuxer blocked on
@@ -1892,10 +2201,7 @@ class _Torrent:
             ordered = (list(tail) if self._index_reads_forward()
                        else list(reversed(tail)))
             for index, piece in enumerate(ordered):
-                try:
-                    handle.set_piece_deadline(piece, 300 + index * 120)
-                except Exception:
-                    pass
+                deadlines.append((piece, 300 + index * 120))
             # **The resume band goes in front of the head window, not
             # behind it.**
             #
@@ -1915,10 +2221,16 @@ class _Torrent:
             # useful - and ahead of the rest of the head window.
             start_base = 600 if resuming else 1600
             for index, piece in enumerate(start_band):
-                try:
-                    handle.set_piece_deadline(piece, start_base + index * 200)
-                except Exception:
-                    pass
+                deadlines.append((piece, start_base + index * 200))
+            # The index and the seat band are also inside the urgent bands
+            # at times; the last deadline listed for a piece is its own,
+            # as it was when each one was written over the one before.
+            final = {}
+            for piece, ms in deadlines:
+                if 0 <= piece < total_pieces:
+                    final[piece] = ms
+            self._apply_deadlines(
+                sorted(final.items(), key=lambda pm: pm[1]), priorities)
         except Exception:
             pass
         self.last_touched = time.time()
@@ -1946,10 +2258,10 @@ class _Torrent:
             # (see player._release_playing_torrent).
             if _torrents.get(self.info_hash) is not self:
                 return False
-            try:
-                self.handle.set_piece_deadline(piece, 200)
-            except Exception:
-                pass
+            # Once, not every 100ms - a deadline re-set this often is
+            # never late, and late is what gets a slow peer's last block
+            # asked of a faster one (_set_deadline).
+            self._set_deadline(piece, 200)
             time.sleep(0.1)
         return False
 
@@ -1986,6 +2298,7 @@ _EBML_SEEK = 0x4DBB
 _EBML_SEEKID = 0x53AB
 _EBML_SEEKPOS = 0x53AC
 _EBML_CUES = 0x1C53BB6B
+_EBML_CLUSTER = 0x1F43B675
 _EBML_CUEPOINT = 0xBB
 _EBML_CUETIME = 0xB3
 _EBML_CUETRACKPOS = 0xB7
@@ -2046,6 +2359,38 @@ def _ebml_children(data, pos, end):
         if size is None:
             return
         pos = stop
+
+
+def _matroska_seek_positions(head: bytes):
+    """Every absolute position the SeekHead names (Cues, Tags, Chapters,
+    Attachments...), or [] when the head cannot be read that far. The
+    demuxer reads each of these at open, so the ones past the clusters
+    are the whole of what a resume needs from the file's end - see
+    _Torrent._mkv_tail_start."""
+    try:
+        segment_start = segment_end = None
+        for element, start, stop in _ebml_children(head, 0, len(head)):
+            if element == _EBML_SEGMENT:
+                segment_start, segment_end = start, stop
+                break
+        if segment_start is None:
+            return []
+        found = []
+        for element, start, stop in _ebml_children(
+                head, segment_start, min(segment_end or len(head), len(head))):
+            if element != _EBML_SEEKHEAD:
+                continue
+            for sub, sub_start, sub_stop in _ebml_children(head, start, stop):
+                if sub != _EBML_SEEK:
+                    continue
+                for leaf, leaf_start, leaf_stop in _ebml_children(
+                        head, sub_start, sub_stop):
+                    if leaf == _EBML_SEEKPOS:
+                        found.append(segment_start + _ebml_uint(
+                            head, leaf_start, leaf_stop - leaf_start))
+        return found
+    except Exception:
+        return []
 
 
 def _matroska_layout(head: bytes):
@@ -2467,6 +2812,27 @@ def _mp4_seat_for(track, seconds):
         return _mp4_sample_offset(track, index)
     except Exception:
         return None
+
+
+def _mp4_time_for_byte(track, offset):
+    """The time of the last sync sample whose byte is at or before
+    `offset` - _mp4_seat_for read backwards. Bisects over the sync
+    samples (every sample when the track has no stss), whose offsets
+    rise with them in any file a stream can play front to back."""
+    samples = track["sync"] or range(len(track["dts"]))
+    low, high = 0, len(samples)
+    while low < high:
+        middle = (low + high) // 2
+        byte = _mp4_sample_offset(track, samples[middle])
+        if byte is not None and byte <= offset:
+            low = middle + 1
+        else:
+            high = middle
+    if low == 0:
+        return 0.0
+    sample = samples[low - 1]
+    return max(0.0, (track["dts"][sample] - track["edit_offset"])
+               / float(track["timescale"]))
 
 
 def _piece_priorities(handle) -> list:
@@ -3614,7 +3980,8 @@ def file_progress(info_hash: str, index=None) -> dict:
         return {}
 
 
-def on_disk(info_hash: str, from_fraction: float = 0.0) -> dict:
+def on_disk(info_hash: str, from_fraction: float = 0.0,
+            from_seconds=None) -> dict:
     """What of the file being *played* is on disk - for the player's
     Completed row and the light band of its seek strip.
 
@@ -3637,7 +4004,23 @@ def on_disk(info_hash: str, from_fraction: float = 0.0) -> dict:
                                is missing. A gap ends it: past a gap the
                                player would stall, so it is not
                                "loaded" in the sense the strip means.
+      reach_seconds            (only with `from_seconds`, when the file's
+                               seek index is parsed) the same run's end
+                               as a *time*, through the index; None when
+                               it reaches the end of the file.
     {} when the engine does not hold the torrent.
+
+    **A fraction of the bytes is not a fraction of the time**, and the
+    owner's screenshot of 23 November 2026 is what that cost: "Buffering"
+    over a strip and a Loaded Time of 63.6s. Mythic Quest S02E05 (GLHF,
+    2.09GB, 1561s) carries its first half at a higher bitrate than its
+    average - the Cues put 8:22 at 721MiB, the proportion at 641MiB - so
+    the run was measured from 80MiB behind the reader and its end, the
+    missing piece 371 at 722MiB the stream was waiting 29.5s for, was
+    turned back into 9:25. What was really ahead of the playhead was
+    nothing. With `from_seconds` the start is the keyframe the demuxer is
+    reading and the end is converted by the same index; the proportion
+    remains only for a file with no index this code can read.
 
     One `status(query_pieces)` call, not a have_piece() per piece -
     measured below on the GUI thread's own clock."""
@@ -3659,7 +4042,14 @@ def on_disk(info_hash: str, from_fraction: float = 0.0) -> dict:
         except Exception:
             done = 0
         have = torrent.handle.status(lt.torrent_handle.query_pieces).pieces
-        start = int(min(max(float(from_fraction or 0.0), 0.0), 1.0) * (size - 1))
+        start = indexed = None
+        if from_seconds is not None:
+            indexed = torrent.indexed_byte(max(float(from_seconds), 0.0))
+            if indexed is not None:
+                start = min(max(int(indexed), 0), size - 1)
+        if start is None:
+            start = int(min(max(float(from_fraction or 0.0), 0.0), 1.0)
+                        * (size - 1))
         piece = torrent.piece_at(start)
         last = torrent.piece_at(size - 1)
         while piece <= last and piece < len(have) and have[piece]:
@@ -3671,9 +4061,13 @@ def on_disk(info_hash: str, from_fraction: float = 0.0) -> dict:
             # offsets (the file need not start on a piece boundary).
             reach = max(start, piece * torrent.piece_length()
                         - torrent.file_offset())
-        return {"done": done, "total": size,
-                "fraction": min(1.0, done / size),
-                "reach_fraction": min(1.0, reach / size)}
+        answer = {"done": done, "total": size,
+                  "fraction": min(1.0, done / size),
+                  "reach_fraction": min(1.0, reach / size)}
+        if indexed is not None:
+            answer["reach_seconds"] = (None if reach >= size
+                                       else torrent.indexed_time(reach))
+        return answer
     except Exception:
         return {}
 
@@ -4148,10 +4542,8 @@ def await_start(info_hash: str, data_wait: float = 20.0,
         # somebody else) - stop waiting on it at once.
         if _torrents.get(torrent.info_hash) is not torrent:
             break
-        try:
-            torrent.handle.set_piece_deadline(first_piece, 200)
-        except Exception:
-            pass
+        # Once, not every 50ms - see _Torrent._set_deadline.
+        torrent._set_deadline(first_piece, 200)
         time.sleep(0.05)
     return got_data, got_index
 

@@ -1478,3 +1478,83 @@ remembered pick matches by it.
 Not covered: debrid and direct links (no file on this disk), most .mp4s and
 anything without a text track, and a steady drift (a frame-rate mismatch),
 which is rejected rather than half-fixed.
+
+## The swarm was not slow; the deadlines were (23 November 2026)
+
+His screenshot: Mythic Quest S02E05 (GLHF, 2.09GB, needs 1.47MB/s) on
+"Buffering..." with 5 peers at 523KB/s, and his log waiting 18-29s per
+piece. Measured on his release, real engine, a separate cache: the same
+swarm gave **13-27MB/s** with no window (`download_whole`) and
+**0.44-1.15MB/s** streaming. A bare libtorrent session with the engine's
+window shape and 1s re-aim ran 6-10MB/s, so it was not the window. What
+the piece queue showed: the blocked piece at 124 of 125 blocks, its last
+block requested from a peer at 1-2KB/s for 10-20s while another sent
+500-700KB/s. libtorrent re-asks a late piece's busy blocks from a faster
+peer, and `_apply_windows` cleared and re-set every deadline each second
+(and `wait_for`/`await_start` re-set theirs every 100ms/50ms), so no piece
+was ever late. `_Torrent._set_deadline` sets once; `_apply_deadlines`
+clears only when a deadline points at a piece no longer wanted (a seek -
+the 25 August reason for clearing).
+
+The evidence, honestly: never clearing at all, two alternated pairs,
+first byte 63.5s/39.5s -> 6.5s/0.5s and 66MB/24MB -> 132MB/132MB served in
+90s. The shipped change against the old behaviour, mpv-like reader (64MiB
+readahead, playhead at 1.47MB/s), nine runs: mid-play frozen old 76/0/0%,
+new 56/0/0/0/0/0%. Swarm variance is as large as the effect; read new
+numbers against a control.
+
+**The ~60s opening cliff was wanting nothing for a moment.** Seen on both
+sides of that A/B (old 67.9/66.6s, new 65.4/62.5s): the seat's piece at
+priority 7 requested from nobody, two peers left, both choking us, the rest
+back at 66-71s - libtorrent's `min_reconnect_time`, 60s. Sampled every
+0.25s from add(): one sample with no missing piece wanted, and 0.3s later
+the seed sending 1.9MB/s was gone; that run had no picture in 100s. While a
+resume is pending the window is the urgent band (1-4 pieces) and its scan
+for a missing piece is capped at four windows, so a seat band already on
+disk left a window of pieces this machine had. `_Torrent._keep_interested`
+keeps KEEP_INTERESTED_PIECES (2) missing pieces wanted. Five alternated
+pairs: old 3 zero-wanted samples and 1 run with no picture in 100s, new 0
+and 0; 8MB at 37.8/37.3/45.3/22.3s/never against 21.8/27.6/47.1/28.1/23.1s.
+The opening was still 15-25s to the first MB on this swarm; see the next
+section for what it was spent on.
+
+Tried and dropped: `max_out_request_queue` 96 (the one fast seed carried
+250-450 queued blocks) - picture 62.5/30.6/1.3s against 2.6/12.6/34.8s
+without it, no difference. Not built: switching sources mid-play on a slow
+rate. On this release the swarm was never the limit, so a switch would
+have walked away from a 27MB/s source.
+
+## A resume's opening fetches four pieces, not six to fourteen (24 November 2026)
+
+His ask after the above: *"fix the 15-25 sec first MB too"*. Split on the
+same release, live: a peer at 0.5s, a first unchoke at 1-2s, and then the
+swarm's rate (0.1-1.5MB/s, five real peers) spent on pieces nobody reads. A
+resume opening needs the header, the Cues and the seat's piece - on GLHF's
+2MB pieces that is 0, 1023, 1024 and 321. What was fetched instead, three
+ways:
+
+- **The header band walked.** `_apply_windows` skips pieces already on disk
+  so a window is never idle, and that skip moved the header read past the
+  header: pieces 1 to 9 fetched at priority 7 beside the Cues in one live
+  run (seat armed at 53s). While a seat is owed, a window inside the header
+  now stops at its end.
+- **The header was 4MB by assumption** - three pieces here, while the file's
+  first Cluster starts inside piece 0. `_resume_header_last` walks the top
+  level of the Segment piece by piece to the first Cluster (Judas' Black
+  Clover: 4.1MB of attached fonts, followed in full; the old 4MB cut them).
+- **The tail was 4MB by assumption** - the Cues are the last 515KB here,
+  32-621KB on all 26 Matroska files in this machine's cache. The index band
+  is now the lowest SeekHead position in the file's second half to the end
+  (`_mkv_tail_start`), and before the head is on disk the last 1MB.
+
+The live swarm moved too much to compare variants (one run 13.9s, the next
+53s with the same code), so the A/B is one local seeder at a fixed rate
+(`local_ab.py`: the real engine, the real .torrent, his cached copy of the
+file as the seed), three alternated pairs each:
+
+    1.0MB/s   old 14.6 15.0 15.1s   new 9.6 9.6 9.6s    6 pieces -> 4
+    0.5MB/s   old 27.1 25.1 23.1s   new 16.0 15.6 16.0s
+
+What is left is the four pieces at whatever the swarm gives - that is
+the floor (about 7MB, so ~7s at 1MB/s and ~14s at 0.5MB/s) while a piece
+must be whole before it can be read.
