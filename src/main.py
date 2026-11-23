@@ -1656,6 +1656,11 @@ class _MotionIconButton(QPushButton):
             # eased this, so it is handed over as it stands.
             rail_anim.paint(painter, self._profile, rect, self._hover, colour,
                             int(size), float(self.devicePixelRatioF() or 1.0))
+        # Ended here, never left to the return: a painter that outlives
+        # its paint (a frame kept by another thread) closes Qt's shared
+        # painter wherever it is finally freed - logs.start_stall_watch
+        # has the crash that did.
+        painter.end()
 
 
 class _RailDelegate(QStyledItemDelegate):

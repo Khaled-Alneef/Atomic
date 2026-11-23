@@ -2966,6 +2966,7 @@ class SeekBar(QWidget):
             painter.setBrush(QColor(theme.TEXT_OVER_MEDIA))
             painter.setPen(QPen(QColor(0, 0, 0, 90), 1.5))
             painter.drawEllipse(centre, knob, knob)
+        painter.end()       # never left to the return: logs.start_stall_watch
 
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton or self._duration <= 0:
@@ -3064,6 +3065,7 @@ class PlayPauseButton(QPushButton):
             painter.drawRoundedRect(
                 QRectF(cx + gap / 2, cy - height / 2, width, height),
                 radius, radius)
+        painter.end()       # never left to the return: logs.start_stall_watch
 
 
 # The ±10s SkipButtons that sat either side of play are gone at the
