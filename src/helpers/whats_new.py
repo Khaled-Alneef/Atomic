@@ -30,6 +30,10 @@ update_did_not_install = False
 # version -> what changed, in the user's terms. Newest first is not
 # required; they get sorted by version when shown.
 NOTES = {
+    "3.28": [
+        "Fixed a crash that could close the app while it was drawing - most "
+        "often right after folding or unfolding the sidebar.",
+    ],
     "3.27": [
         "Kolnovel novels list their chapters again - the site changed its "
         "design and every title showed none. Long novels show their whole "

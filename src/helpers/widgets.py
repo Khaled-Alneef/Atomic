@@ -296,6 +296,9 @@ class GlassPage(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), self._base)
+        # Ended before the frame paints with its own, and never left to
+        # the return (logs.start_stall_watch has why).
+        painter.end()
         super().paintEvent(event)
 
 

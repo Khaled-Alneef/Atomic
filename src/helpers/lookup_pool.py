@@ -57,16 +57,36 @@ WATCHED_STUCK_S = 20.0
 
 
 def _log_stacks(name):
+    # Read as text from faulthandler, never as frame objects: a frame
+    # held here keeps the UI thread's locals alive and frees them on
+    # this thread - a painter among them closes Qt's shared painter
+    # mid-paint (logs.start_stall_watch has the crash and the numbers).
     try:
-        import sys
-        import traceback
+        import faulthandler
+        import re
+        import tempfile
         from . import logs
         names = {t.ident: t.name for t in threading.enumerate()}
+        with tempfile.TemporaryFile() as dump:
+            faulthandler.dump_traceback(dump, all_threads=True)
+            dump.seek(0)
+            text = dump.read().decode("utf-8", "replace")
         parts = [f"watched job {name} still running after {WATCHED_STUCK_S:.0f}s; threads:"]
-        for ident, frame in sys._current_frames().items():
-            stack = traceback.extract_stack(frame)[-8:]
-            parts.append(f"-- {names.get(ident, ident)}: " + " <- ".join(
-                f"{pathlib_name(f.filename)}:{f.lineno} {f.name}" for f in reversed(stack)))
+        heading = re.compile(r"^(?:Current thread|Thread) 0x([0-9a-fA-F]+)")
+        frame_line = re.compile(r'^\s+File "(.*)", line (\S+) in (.*)$')
+        stack, who = [], None
+        for line in text.splitlines() + [""]:
+            head = heading.match(line)
+            found = frame_line.match(line)
+            if found:
+                stack.append(f"{pathlib_name(found.group(1))}:{found.group(2)} "
+                             f"{found.group(3)}")
+                continue
+            if who is not None and (head or not line.strip()):
+                parts.append(f"-- {names.get(who, who)}: " + " <- ".join(stack[:8]))
+                stack, who = [], None
+            if head:
+                who = int(head.group(1), 16)
         logs.info("\n".join(parts))
     except Exception:
         pass

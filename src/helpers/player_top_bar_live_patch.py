@@ -443,7 +443,9 @@ class _VolumeOsd:
                 def paintEvent(self, event):
                     if osd._image is not None:
                         from PyQt6.QtGui import QPainter
-                        QPainter(self).drawImage(0, 0, osd._image)
+                        painter = QPainter(self)
+                        painter.drawImage(0, 0, osd._image)
+                        painter.end()       # logs.start_stall_watch
 
             self._inner = _Inner(backdrop)
             self._inner.resize(self.WIDTH, self.HEIGHT)

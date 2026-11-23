@@ -213,15 +213,6 @@ def start_stall_watch():
         timer.start(STALL_BEAT_MS)
         start_stall_watch._timer = timer       # kept alive on the function
 
-        def where(frame, depth):
-            """The UI thread's innermost `depth` frames as one line."""
-            parts = []
-            while frame is not None and len(parts) < depth:
-                code = frame.f_code
-                name = code.co_filename.replace("\\", "/").rsplit("/", 2)
-                parts.append(f"{'/'.join(name[-2:])}:{frame.f_lineno} {code.co_name}")
-                frame = frame.f_back
-            return " < ".join(parts)
 
         # **One snapshot is a moment, not the stall.** The first version
         # logged the stack once, at the 1.5s mark, and it named
@@ -234,20 +225,76 @@ def start_stall_watch():
         import collections
         ring = collections.deque(maxlen=int(60 / STALL_SAMPLE_S))
 
+        # **The UI thread's stack is read as text, never as frames.** His
+        # crash of 23 November 2026, and of 7, 11 and 13 November - the
+        # first the day after this watcher landed, no Qt6Gui crash in the
+        # forty days before: an access violation in Qt6Gui at
+        # QRasterPaintEngine::renderHintsChanged+0x3d (and fillRect+0x2f),
+        # a painter whose state was null. This watcher took the UI
+        # thread's frame (`sys._current_frames()`) and kept it through its
+        # 100ms sleep. A sample that landed inside a paintEvent kept that
+        # frame - and its `painter` local - alive after the paint
+        # returned, and the painter was then freed *on this thread* at the
+        # next sample, ending Qt's shared painter while the UI thread was
+        # painting something else. The sidebar's fold chevron left its
+        # painter to its return, and his crash came 0.1s after a fold.
+        #
+        # Measured offscreen (scratch h_heldframe.py, h_watch4.py):
+        #   a frame held and dropped across a sibling's paint
+        #       -> renderHintsChanged+61, his instruction, first repaint
+        #   the same with the painter ended in its paint  -> 200 of 200
+        #   this watcher, frame kept through the sleep, a busy worker
+        #   thread forcing interpreter switches           -> crashed
+        #   the frame dropped the moment it was read      -> still crashed:
+        #       the paint can return while the watcher is reading it
+        # Any reference to a running frame is a reference to its locals,
+        # so none is taken: faulthandler writes every thread's stack to a
+        # file from C, holding nothing, and the UI thread's lines are
+        # read back. The paints that left their painter to the return end
+        # it themselves too (main._MotionIconButton, the player's seek bar
+        # and play button, widgets' painted frame, the volume flyout).
+        import faulthandler, re, tempfile
+        dump = tempfile.TemporaryFile()
+        heading = re.compile(r"^(?:Current thread|Thread) 0x([0-9a-fA-F]+)")
+        frame_line = re.compile(r'^\s+File "(.*)", line (\S+) in (.*)$')
+
+        def sample(now):
+            """The UI thread's innermost frames as one line: 7 for the
+            ring, and 16 when a stall is being reported."""
+            dump.seek(0)
+            dump.truncate()
+            faulthandler.dump_traceback(dump, all_threads=True)
+            dump.seek(0)
+            parts, mine = [], False
+            for line in dump.read().decode("utf-8", "replace").splitlines():
+                head = heading.match(line)
+                if head:
+                    mine = int(head.group(1), 16) == main_ident
+                    continue
+                found = frame_line.match(line) if mine else None
+                if found:
+                    name = found.group(1).replace("\\", "/").rsplit("/", 2)
+                    parts.append(f"{'/'.join(name[-2:])}:{found.group(2)} "
+                                 f"{found.group(3)}")
+            short = " < ".join(parts[:7]) or "?"
+            full = (" < ".join(parts[:16]) or "?") \
+                if now - beat[0] > STALL_S else None
+            return short, full
+
         def watch():
             reported = None             # the beat a stall was reported for
             while True:
                 time.sleep(STALL_SAMPLE_S)
                 try:
                     now = time.monotonic()
-                    frame = sys._current_frames().get(main_ident)
-                    ring.append((now, where(frame, 7) if frame else "?"))
+                    short, full = sample(now)
+                    ring.append((now, short))
                     last = beat[0]
                     late = now - last
                     if late > STALL_S and reported is None:
                         reported = last
                         warning(f"ui stall: the window has not ticked for "
-                                f"{late:.1f}s; UI thread at: {where(frame, 16)}")
+                                f"{late:.1f}s; UI thread at: {full or short}")
                     elif reported is not None and reported != last:
                         counts = {}
                         for at, key in ring:
